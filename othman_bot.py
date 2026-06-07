@@ -1,161 +1,295 @@
-//@version=6
-indicator("مستويات البيفوت + شهري - Pivot Levels", overlay=true, max_lines_count=500)
+import requests
+import time
+import asyncio
+import json
+from datetime import datetime
+from telegram import Bot, ParseMode
 
-// ========== الإعدادات - جميعها في البداية ==========
-showMonthly = input.bool(true, "إظهار الشهر", group="الإطارات الزمنية")
-showWeekly = input.bool(true, "إظهار الأسبوع", group="الإطارات الزمنية")
-showDaily = input.bool(true, "إظهار اليوم", group="الإطارات الزمنية")
-showH4 = input.bool(true, "إظهار 4 ساعات", group="الإطارات الزمنية")
-showMidpoints = input.bool(true, "إظهار المستويات الوسيطة", group="الإطارات الزمنية")
-showLabels = input.bool(true, "إظهار التسميات", group="الإعدادات")
+# ========== إعداداتك الشخصية (عدليها قبل التشغيل) ==========
+TELEGRAM_TOKEN = "8932925426:AAHh3RWwa4ZwkVBJQeoMhYGFmO5nEgWMJpw"
+CHAT_ID = "ضع_معرفك_هنا"
+# ===========================================================
 
-// الألوان
-colorMonthlyPivot = input.color(color.new(color.purple, 0), "M Pivot", group="الشهر")
-colorMonthlyR1 = input.color(color.new(color.red, 10), "M R1", group="الشهر")
-colorMonthlyS1 = input.color(color.new(color.green, 10), "M S1", group="الشهر")
-colorMonthlyR2 = input.color(color.new(color.red, 30), "M R2", group="الشهر")
-colorMonthlyS2 = input.color(color.new(color.green, 30), "M S2", group="الشهر")
+bot = Bot(token=TELEGRAM_TOKEN)
 
-colorWeeklyPivot = input.color(color.new(color.yellow, 0), "W Pivot", group="الأسبوع")
-colorWeeklyR1 = input.color(color.new(color.red, 20), "W R1", group="الأسبوع")
-colorWeeklyS1 = input.color(color.new(color.green, 20), "W S1", group="الأسبوع")
-colorWeeklyR2 = input.color(color.new(color.red, 40), "W R2", group="الأسبوع")
-colorWeeklyS2 = input.color(color.new(color.green, 40), "W S2", group="الأسبوع")
+# الأسواق اللي هنتابعها
+SYMBOLS = {
+    "XAUUSD": "الذهب (XAU/USD)",
+    "XAGUSD": "الفضة (XAG/USD)"
+}
 
-colorDailyPivot = input.color(color.new(color.orange, 0), "D Pivot", group="اليوم")
-colorDailyR1 = input.color(color.new(color.red, 30), "D R1", group="اليوم")
-colorDailyS1 = input.color(color.new(color.green, 30), "D S1", group="اليوم")
-colorDailyR2 = input.color(color.new(color.red, 50), "D R2", group="اليوم")
-colorDailyS2 = input.color(color.new(color.green, 50), "D S2", group="اليوم")
+# BASE URL لـ QOS API
+QOS_BASE_URL = "https://quote.qos.hk"
 
-colorH4Pivot = input.color(color.new(color.aqua, 0), "4H Pivot", group="4 ساعات")
-colorH4R1 = input.color(color.new(color.red, 40), "4H R1", group="4 ساعات")
-colorH4S1 = input.color(color.new(color.green, 40), "4H S1", group="4 ساعات")
-colorH4R2 = input.color(color.new(color.red, 60), "4H R2", group="4 ساعات")
-colorH4S2 = input.color(color.new(color.green, 60), "4H S2", group="4 ساعات")
+def get_price_qos(symbol):
+    """جلب سعر الذهب/الفضة من QOS API"""
+    try:
+        # QOS API تستخدم رمز XAUUSD و XAGUSD
+        url = f"{QOS_BASE_URL}/api/quote?symbol={symbol}"
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # حسب الـ API documentation، السعر في حقل price أو last
+            price = data.get('price') or data.get('last') or data.get('c')
+            if price:
+                return float(price)
+        
+        # لو فشل، نجرب endpoint تاني
+        url2 = f"{QOS_BASE_URL}/quote/{symbol}"
+        response2 = requests.get(url2, headers=headers, timeout=10)
+        if response2.status_code == 200:
+            data2 = response2.json()
+            price = data2.get('price') or data2.get('last')
+            if price:
+                return float(price)
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ خطأ في جلب سعر {symbol}: {e}")
+        return None
 
-colorMidSupport = input.color(color.new(color.green, 70), "MS", group="المستويات الوسيطة")
-colorMidResistance = input.color(color.new(color.red, 70), "MR", group="المستويات الوسيطة")
+def get_kline_data(symbol, interval="1min", limit=30):
+    """جلب بيانات الشموع (K-line) من QOS API"""
+    try:
+        url = f"{QOS_BASE_URL}/api/kline"
+        params = {
+            "symbol": symbol,
+            "interval": interval, # 1min, 5min, 15min, 1hour, 1day
+            "limit": limit
+        }
+        headers = {"User-Agent": "Mozilla/5.0"}
+        
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # حسب الـ API، البيانات قد تكون في data.items أو data['data']
+            if 'data' in data:
+                return data['data']
+            elif isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                # بعض الأحيان البيانات تكون في list من الـ klines
+                for key in ['klines', 'items', 'list']:
+                    if key in data:
+                        return data[key]
+                return [data] # لو كانت البيانات مفردة
+        
+        return []
+        
+    except Exception as e:
+        print(f"⚠️ خطأ في جلب بيانات الشموع لـ {symbol}: {e}")
+        return []
 
-lineWidthMonth = input.int(3, "سُمك الشهر", minval=1, maxval=5)
-lineWidth = input.int(2, "سُمك الخط", minval=1, maxval=5)
-lineWidthMid = input.int(1, "سُمك الوسيط", minval=1, maxval=3)
+def calculate_ema(prices, period=12):
+    """حساب EMA"""
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    
+    multiplier = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices[1:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
 
-// ========== جلب البيانات ==========
-[monthlyH, monthlyL, monthlyC] = request.security(syminfo.tickerid, "M", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
-[weeklyH, weeklyL, weeklyC] = request.security(syminfo.tickerid, "W", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
-[dailyH, dailyL, dailyC] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
-[h4H, h4L, h4C] = request.security(syminfo.tickerid, "240", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+def calculate_rsi(prices, period=14):
+    """حساب RSI"""
+    if len(prices) < period + 1:
+        return 50
+    
+    gains = []
+    losses = []
+    
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        if diff > 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+    
+    avg_gain = sum(gains[-period:]) / period if gains else 0
+    avg_loss = sum(losses[-period:]) / period if losses else 0
+    
+    if avg_loss == 0:
+        return 100
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-// ========== حساب المستويات - الشهر ==========
-monthlyPP = (monthlyH + monthlyL + monthlyC) / 3
-monthlyR1 = 2 * monthlyPP - monthlyL
-monthlyS1 = 2 * monthlyPP - monthlyH
-monthlyR2 = monthlyPP + (monthlyH - monthlyL)
-monthlyS2 = monthlyPP - (monthlyH - monthlyL)
-monthlyR3 = monthlyPP + 1.5 * (monthlyH - monthlyL)
-monthlyS3 = monthlyPP - 1.5 * (monthlyH - monthlyL)
-monthlyMR = (monthlyPP + monthlyR1) / 2
-monthlyMS = (monthlyPP + monthlyS1) / 2
+def generate_signal(symbol_name, current_price, kline_data):
+    """توليد إشارة Buy/Sell بناءً على التحليل"""
+    if not kline_data or len(kline_data) < 20:
+        return "انتظار", 0, "بيانات غير كافية للتحليل"
+    
+    # استخراج أسعار الإغلاق من بيانات الشموع
+    closes = []
+    for item in kline_data:
+        # حسب تنسيق QOS API، السعر في حقل close
+        if isinstance(item, dict):
+            close = item.get('close') or item.get('c') or item.get('price')
+        elif isinstance(item, (list, tuple)) and len(item) >= 5:
+            # بعض الأحيان البيانات تكون [time, open, high, low, close, volume]
+            close = item[4]
+        else:
+            continue
+        
+        if close:
+            try:
+                closes.append(float(close))
+            except:
+                pass
+    
+    if len(closes) < 15:
+        return "انتظار", 0, f"بيانات غير كافية (متوفر {len(closes)} شمعة فقط)"
+    
+    # حساب المؤشرات
+    ema_fast = calculate_ema(closes, 9)
+    ema_slow = calculate_ema(closes, 21)
+    rsi = calculate_rsi(closes, 14)
+    last_price = closes[-1]
+    
+    # توليد الإشارة
+    signal = "انتظار"
+    confidence = 50
+    reasons = []
+    
+    # 1. تقاطع EMA
+    if ema_fast > ema_slow and closes[-2] <= ema_slow:
+        signal = "شراء 🟢"
+        confidence = 70
+        reasons.append("تقاطع EMA صاعد (Golden Cross)")
+    elif ema_fast < ema_slow and closes[-2] >= ema_slow:
+        signal = "بيع 🔴"
+        confidence = 70
+        reasons.append("تقاطع EMA هابط (Death Cross)")
+    
+    # 2. RSI مع تقاطع EMA
+    if signal == "انتظار":
+        if rsi < 30 and ema_fast > ema_slow:
+            signal = "شراء 🟢"
+            confidence = 65
+            reasons.append(f"RSI في منطقة ذروة البيع ({rsi:.1f}) مع اتجاه صاعد")
+        elif rsi > 70 and ema_fast < ema_slow:
+            signal = "بيع 🔴"
+            confidence = 65
+            reasons.append(f"RSI في منطقة ذروة الشراء ({rsi:.1f}) مع اتجاه هابط")
+    
+    # 3. RSI فقط
+    if signal == "انتظار":
+        if rsi < 25:
+            signal = "شراء 🟢"
+            confidence = 55
+            reasons.append(f"RSI في ذروة بيع شديدة ({rsi:.1f})")
+        elif rsi > 80:
+            signal = "بيع 🔴"
+            confidence = 55
+            reasons.append(f"RSI في ذروة شراء شديدة ({rsi:.1f})")
+    
+    if signal == "انتظار":
+        reasons.append(f"RSI {rsi:.1f} في المنطقة المحايدة")
+        reasons.append(f"EMA Fast {ema_fast:.2f} | Slow {ema_slow:.2f}")
+    
+    reason_text = "\n• ".join(reasons)
+    return signal, confidence, reason_text
 
-// ========== حساب المستويات - الأسبوع ==========
-weeklyPP = (weeklyH + weeklyL + weeklyC) / 3
-weeklyR1 = 2 * weeklyPP - weeklyL
-weeklyS1 = 2 * weeklyPP - weeklyH
-weeklyR2 = weeklyPP + (weeklyH - weeklyL)
-weeklyS2 = weeklyPP - (weeklyH - weeklyL)
-weeklyR3 = weeklyPP + 1.5 * (weeklyH - weeklyL)
-weeklyS3 = weeklyPP - 1.5 * (weeklyH - weeklyL)
-weeklyMR = (weeklyPP + weeklyR1) / 2
-weeklyMS = (weeklyPP + weeklyS1) / 2
+async def send_signal():
+    """إرسال الإشارة إلى تليجرام"""
+    for symbol, name in SYMBOLS.items():
+        print(f"🔄 جاري تحليل {name}...")
+        
+        # 1. جلب السعر الحالي
+        price = get_price_qos(symbol)
+        if not price:
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"⚠️ *{name}* - تعذر جلب السعر من QOS API",
+                parse_mode='Markdown'
+            )
+            continue
+        
+        # 2. جلب بيانات الشموع
+        kline_data = get_kline_data(symbol, interval="5min", limit=50)
+        
+        # 3. توليد الإشارة
+        signal, confidence, reason = generate_signal(name, price, kline_data)
+        
+        # 4. تنسيق الرسالة
+        if "شراء" in signal:
+            icon = "🟢💰"
+        elif "بيع" in signal:
+            icon = "🔴📉"
+        else:
+            icon = "⏳📊"
+        
+        confidence_stars = "⭐" * min(5, confidence // 15)
+        if confidence < 40:
+            confidence_stars = "✨" + confidence_stars
+        
+        message = f"""
+{icon} *{name}* {icon}
 
-// ========== حساب المستويات - اليوم ==========
-dailyPP = (dailyH + dailyL + dailyC) / 3
-dailyR1 = 2 * dailyPP - dailyL
-dailyS1 = 2 * dailyPP - dailyH
-dailyR2 = dailyPP + (dailyH - dailyL)
-dailyS2 = dailyPP - (dailyH - dailyL)
-dailyR3 = dailyPP + 1.5 * (dailyH - dailyL)
-dailyS3 = dailyPP - 1.5 * (dailyH - dailyL)
-dailyMR = (dailyPP + dailyR1) / 2
-dailyMS = (dailyPP + dailyS1) / 2
+💰 *السعر الحالي:* `${price:.2f}`
 
-// ========== حساب المستويات - 4 ساعات ==========
-h4PP = (h4H + h4L + h4C) / 3
-h4R1 = 2 * h4PP - h4L
-h4S1 = 2 * h4PP - h4H
-h4R2 = h4PP + (h4H - h4L)
-h4S2 = h4PP - (h4H - h4L)
-h4R3 = h4PP + 1.5 * (h4H - h4L)
-h4S3 = h4PP - 1.5 * (h4H - h4L)
-h4MR = (h4PP + h4R1) / 2
-h4MS = (h4PP + h4S1) / 2
+🎯 *الإشارة:* *{signal}*
+📈 *نسبة الثقة:* {confidence}% {confidence_stars}
 
-// ========== الرسم - الشهر ==========
-plot(showMonthly ? monthlyPP : na, "M-PP", colorMonthlyPivot, lineWidthMonth)
-plot(showMonthly ? monthlyR1 : na, "M-R1", colorMonthlyR1, lineWidthMonth)
-plot(showMonthly ? monthlyS1 : na, "M-S1", colorMonthlyS1, lineWidthMonth)
-plot(showMonthly ? monthlyR2 : na, "M-R2", colorMonthlyR2, lineWidthMonth)
-plot(showMonthly ? monthlyS2 : na, "M-S2", colorMonthlyS2, lineWidthMonth)
-plot(showMonthly and showMidpoints ? monthlyR3 : na, "M-R3", color.new(color.red, 80), lineWidthMid)
-plot(showMonthly and showMidpoints ? monthlyS3 : na, "M-S3", color.new(color.green, 80), lineWidthMid)
-plot(showMonthly and showMidpoints ? monthlyMR : na, "M-MR", colorMidResistance, lineWidthMid)
-plot(showMonthly and showMidpoints ? monthlyMS : na, "M-MS", colorMidSupport, lineWidthMid)
+📝 *التحليل:*
+• {reason}
 
-// ========== الرسم - الأسبوع ==========
-plot(showWeekly ? weeklyPP : na, "W-PP", colorWeeklyPivot, lineWidth)
-plot(showWeekly ? weeklyR1 : na, "W-R1", colorWeeklyR1, lineWidth)
-plot(showWeekly ? weeklyS1 : na, "W-S1", colorWeeklyS1, lineWidth)
-plot(showWeekly ? weeklyR2 : na, "W-R2", colorWeeklyR2, lineWidth)
-plot(showWeekly ? weeklyS2 : na, "W-S2", colorWeeklyS2, lineWidth)
-plot(showWeekly and showMidpoints ? weeklyR3 : na, "W-R3", color.new(color.red, 80), lineWidthMid)
-plot(showWeekly and showMidpoints ? weeklyS3 : na, "W-S3", color.new(color.green, 80), lineWidthMid)
-plot(showWeekly and showMidpoints ? weeklyMR : na, "W-MR", colorMidResistance, lineWidthMid)
-plot(showWeekly and showMidpoints ? weeklyMS : na, "W-MS", colorMidSupport, lineWidthMid)
+⏰ *آخر تحديث:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-// ========== الرسم - اليوم ==========
-plot(showDaily ? dailyPP : na, "D-PP", colorDailyPivot, lineWidth)
-plot(showDaily ? dailyR1 : na, "D-R1", colorDailyR1, lineWidth)
-plot(showDaily ? dailyS1 : na, "D-S1", colorDailyS1, lineWidth)
-plot(showDaily ? dailyR2 : na, "D-R2", colorDailyR2, lineWidth)
-plot(showDaily ? dailyS2 : na, "D-S2", colorDailyS2, lineWidth)
-plot(showDaily and showMidpoints ? dailyR3 : na, "D-R3", color.new(color.red, 80), lineWidthMid)
-plot(showDaily and showMidpoints ? dailyS3 : na, "D-S3", color.new(color.green, 80), lineWidthMid)
-plot(showDaily and showMidpoints ? dailyMR : na, "D-MR", colorMidResistance, lineWidthMid)
-plot(showDaily and showMidpoints ? dailyMS : na, "D-MS", colorMidSupport, lineWidthMid)
+---
+⚠️ هذه إشارة تحليل فني فقط
+📌 قرار البيع والشراء مسؤوليتك الشخصية
+"""
+        
+        try:
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=message,
+                parse_mode='Markdown'
+            )
+            print(f"✅ تم إرسال إشارة {name}: {signal}")
+        except Exception as e:
+            print(f"❌ فشل إرسال إشارة {name}: {e}")
+        
+        # انتظار بين الرموز عشان ما نضربش Rate Limit
+        await asyncio.sleep(3)
 
-// ========== الرسم - 4 ساعات ==========
-plot(showH4 ? h4PP : na, "4H-PP", colorH4Pivot, lineWidth)
-plot(showH4 ? h4R1 : na, "4H-R1", colorH4R1, lineWidth)
-plot(showH4 ? h4S1 : na, "4H-S1", colorH4S1, lineWidth)
-plot(showH4 ? h4R2 : na, "4H-R2", colorH4R2, lineWidth)
-plot(showH4 ? h4S2 : na, "4H-S2", colorH4S2, lineWidth)
-plot(showH4 and showMidpoints ? h4R3 : na, "4H-R3", color.new(color.red, 80), lineWidthMid)
-plot(showH4 and showMidpoints ? h4S3 : na, "4H-S3", color.new(color.green, 80), lineWidthMid)
-plot(showH4 and showMidpoints ? h4MR : na, "4H-MR", colorMidResistance, lineWidthMid)
-plot(showH4 and showMidpoints ? h4MS : na, "4H-MS", colorMidSupport, lineWidthMid)
-
-// ========== التسميات - جميع المستويات ==========
-if barstate.islast and showLabels
-    // ===== MONTHLY =====
-    if showMonthly
-        label.new(bar_index, monthlyPP, "M-PP", style=label.style_label_left, color=colorMonthlyPivot, textcolor=color.white, size=size.small)
-        label.new(bar_index, monthlyR1, "M-R1", style=label.style_label_left, color=colorMonthlyR1, textcolor=color.white, size=size.small)
-        label.new(bar_index, monthlyS1, "M-S1", style=label.style_label_left, color=colorMonthlyS1, textcolor=color.white, size=size.small)
-        label.new(bar_index, monthlyR2, "M-R2", style=label.style_label_left, color=colorMonthlyR2, textcolor=color.white, size=size.small)
-        label.new(bar_index, monthlyS2, "M-S2", style=label.style_label_left, color=colorMonthlyS2, textcolor=color.white, size=size.small)
-        if showMidpoints
-            label.new(bar_index, monthlyR3, "M-R3", style=label.style_label_left, color=color.new(color.red, 80), textcolor=color.white, size=size.small)
-            label.new(bar_index, monthlyS3, "M-S3", style=label.style_label_left, color=color.new(color.green, 80), textcolor=color.white, size=size.small)
-            label.new(bar_index, monthlyMR, "M-MR⭐", style=label.style_label_left, color=colorMidResistance, textcolor=color.white, size=size.small)
-            label.new(bar_index, monthlyMS, "M-MS⭐", style=label.style_label_left, color=colorMidSupport, textcolor=color.white, size=size.small)
-   
-    // ===== WEEKLY =====
-    if showWeekly
-        label.new(bar_index, weeklyPP, "W-PP", style=label.style_label_left, color=colorWeeklyPivot, textcolor=color.black, size=size.small)
-        label.new(bar_index, weeklyR1, "W-R1", style=label.style_label_left, color=colorWeeklyR1, textcolor=color.white, size=size.small)
-        label.new(bar_index, weeklyS1, "W-S1", style=label.style_label_left, color=colorWeeklyS1, textcolor=color.white, size=size.small)
-        label.new(bar_index, weeklyR2, "W-R2", style=label.style_label_left, color=colorWeeklyR2, textcolor=color.white, size=size.small)
-        label.new(bar_index, weeklyS2, "W-S2", style=label.style_label_left, color=colorWeeklyS2, textcolor=color.white, size=size.small)
-        if showMidpoints
+async def main():
+    """الحلقة الرئيسية"""
+    print("""
+╔════════════════════════════════════════════════╗
+║ 🥇 بوت إشارات الذهب والفضة - QOS API ║
+╚════════════════════════════════════════════════╝
+    """)
+    print("✅ البوت شغال...")
+    print(f"📊 متابع: {', '.join(SYMBOLS.values())}")
+    print("📡 مصدر البيانات: QOS Quote API")
+    print("-" * 50)
+    
+    while True:
+        try:
+            await send_signal()
             
+            # انتظر 3 دقائق قبل التحليل التالي
+            wait_minutes = 3
+            print(f"⏳ انتظار {wait_minutes} دقائق حتى التحليل التالي...")
+            await asyncio.sleep(wait_minutes * 60)
+            
+        except Exception as e:
+            print(f"⚠️ خطأ في الحلقة الرئيسية: {e}")
+            await asyncio.sleep(30)
+
+if __name__ == "__main__":
+    asyncio.run(main())
