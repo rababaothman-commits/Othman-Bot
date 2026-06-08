@@ -24,6 +24,11 @@ def get_chat_id_automatically():
     """╪¬╪¼┘ä╪¿ ╪º┘ä┘Ç CHAT_ID ╪¬┘ä┘é╪º╪ª┘è╪º┘ï ┘à┘å ╪ó╪«╪▒ ╪¬╪¡╪»┘è╪½ ┘ä┘ä╪¿┘ê╪¬"""
     global MY_CHAT_ID
     try:
+        # If a webhook is still configured for this bot token, getUpdates will return no updates.
+        # Remove any webhook so we can read the incoming /start message by polling.
+        delete_webhook_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true"
+        requests.get(delete_webhook_url, timeout=10)
+
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
         response = requests.get(url, timeout=10)
         data = response.json()
@@ -102,10 +107,10 @@ async def start_health_server():
     return server
 
 
-def validate_bot_token():
+async def validate_bot_token():
     """Validate bot token by checking the Telegram bot account."""
     try:
-        me = bot.get_me()
+        me = await bot.get_me()
         print(f"≡ƒôî ╪º╪│╪¬╪«╪»┘à Bot @{me.username} connected successfully.")
         return True
     except Exception as e:
@@ -261,7 +266,7 @@ async def main():
     global bot
     bot = Bot(token=TELEGRAM_TOKEN)
 
-    if not validate_bot_token():
+    if not await validate_bot_token():
         return
 
     server = await start_health_server()
@@ -276,7 +281,7 @@ async def main():
 
     if MY_CHAT_ID:
         try:
-            bot.send_message(chat_id=MY_CHAT_ID, text="✅ Test message: bot is deployed and can send to this chat.")
+            await bot.send_message(chat_id=MY_CHAT_ID, text="✅ Test message: bot is deployed and can send to this chat.")
             print("≡ƒôî ╪º╪│╪¿╪«╪»┘à ╪º┘ä╪¿┘è╪ª╪⌐ ┘ä╪¬╪¹╪¡╪º: test message sent.")
         except Exception as e:
             print(f"Γ¥î ╪«╪╖╪ú: failed to send test message to TELEGRAM_CHAT_ID: {e}")
