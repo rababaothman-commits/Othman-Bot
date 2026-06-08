@@ -6,7 +6,7 @@ from datetime import datetime
 from telegram import Bot
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 bot = None
 
@@ -100,6 +100,17 @@ async def start_health_server():
     addr = server.sockets[0].getsockname()
     print(f"≡ƒîÉ Health server listening on http://{addr[0]}:{addr[1]}")
     return server
+
+
+def validate_bot_token():
+    """Validate bot token by checking the Telegram bot account."""
+    try:
+        me = bot.get_me()
+        print(f"≡ƒôî ╪º╪│╪¬╪«╪»┘à Bot @{me.username} connected successfully.")
+        return True
+    except Exception as e:
+        print(f"Γ¥î ╪«╪╖╪ú: invalid TELEGRAM_TOKEN or Telegram API error: {e}")
+        return False
 
 
 def calculate_ema(prices, period=12):
@@ -250,6 +261,9 @@ async def main():
     global bot
     bot = Bot(token=TELEGRAM_TOKEN)
 
+    if not validate_bot_token():
+        return
+
     server = await start_health_server()
 
     global MY_CHAT_ID
@@ -259,6 +273,16 @@ async def main():
             print(f"≡ƒôî ╪º╪│╪¬╪«╪»┘à TELEGRAM_CHAT_ID ┘à┘å ╪º┘ä╪¿┘è╪ª╪⌐: {MY_CHAT_ID}")
         except ValueError:
             print("ΓÜá∩╕Å TELEGRAM_CHAT_ID ╪║┘è╪▒ ╪╡╪º┘ä╪¡╪î ╪º╪│╪¬╪«╪»┘à ┘é┘è┘à╪⌐ ╪▒┘é┘à┘è╪⌐ ╪╡╪¡┘è╪¡╪⌐.")
+
+    if MY_CHAT_ID:
+        try:
+            bot.send_message(chat_id=MY_CHAT_ID, text="✅ Test message: bot is deployed and can send to this chat.")
+            print("≡ƒôî ╪º╪│╪¿╪«╪»┘à ╪º┘ä╪¿┘è╪ª╪⌐ ┘ä╪¬╪¹╪¡╪º: test message sent.")
+        except Exception as e:
+            print(f"Γ¥î ╪«╪╖╪ú: failed to send test message to TELEGRAM_CHAT_ID: {e}")
+            server.close()
+            await server.wait_closed()
+            return
 
     if not MY_CHAT_ID:
         print("≡ƒôí ╪¼╪º╪▒┘è ╪¼┘ä╪¿ Chat ID ╪¬┘ä┘é╪º╪ª┘è╪º┘ï...")
