@@ -7,6 +7,7 @@ from telegram import Bot
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "").strip()
 
 bot = None
 
@@ -19,6 +20,86 @@ SYMBOLS = {
 }
 
 QOS_BASE_URL = "https://quote.qos.hk"
+ALPHA_BASE = "https://www.alphavantage.co/query"
+
+def _alpha_symbols(symbol):
+    """Convert internal symbol to Alpha Vantage FX symbols (from, to).
+    Expects symbols like 'XAUUSD' or 'XAGUSD' and returns ('XAU','USD')."""
+    s = symbol.upper()
+    if len(s) == 6:
+        return s[:3], s[3:]
+    return s, 'USD'
+
+def get_price_alpha(symbol):
+    """Fetch latest price from Alpha Vantage using FX_INTRADAY.`"""
+    if not ALPHA_VANTAGE_KEY:
+        return None
+    from_sym, to_sym = _alpha_symbols(symbol)
+    params = {
+        'function': 'FX_INTRADAY',
+        'from_symbol': from_sym,
+        'to_symbol': to_sym,
+        'interval': '5min',
+        'outputsize': 'compact',
+        'apikey': ALPHA_VANTAGE_KEY,
+    }
+    try:
+        r = requests.get(ALPHA_BASE, params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"AlphaVantage HTTP {r.status_code} for {symbol}")
+            return None
+        data = r.json()
+        # Time series key varies a bit; search for the first Time Series key
+        ts_key = next((k for k in data.keys() if k.startswith('Time Series')), None)
+        if not ts_key:
+            return None
+        series = data.get(ts_key, {})
+        if not series:
+            return None
+        latest = next(iter(series.values()))
+        close = latest.get('4. close') or latest.get('close')
+        if close:
+            return float(close)
+    except Exception as e:
+        print(f"AlphaVantage error for {symbol}: {e}")
+    return None
+
+def get_kline_alpha(symbol, interval='5min', limit=50):
+    """Fetch intraday kline data from Alpha Vantage and return list of close prices."""
+    if not ALPHA_VANTAGE_KEY:
+        return []
+    from_sym, to_sym = _alpha_symbols(symbol)
+    params = {
+        'function': 'FX_INTRADAY',
+        'from_symbol': from_sym,
+        'to_symbol': to_sym,
+        'interval': interval,
+        'outputsize': 'compact',
+        'apikey': ALPHA_VANTAGE_KEY,
+    }
+    try:
+        r = requests.get(ALPHA_BASE, params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"AlphaVantage HTTP {r.status_code} for kline {symbol}")
+            return []
+        data = r.json()
+        ts_key = next((k for k in data.keys() if k.startswith('Time Series')), None)
+        if not ts_key:
+            return []
+        series = data.get(ts_key, {})
+        closes = []
+        for t, vals in series.items():
+            close = vals.get('4. close') or vals.get('close')
+            try:
+                closes.append(float(close))
+            except:
+                pass
+        # Alpha returns newest-first; reverse to oldest-first
+        closes.reverse()
+        return closes[:limit]
+    except Exception as e:
+        print(f"AlphaVantage kline error for {symbol}: {e}")
+        return []
 
 def get_chat_id_automatically():
     """╪¬╪¼┘ä╪¿ ╪º┘ä┘Ç CHAT_ID ╪¬┘ä┘é╪º╪ª┘è╪º┘ï ┘à┘å ╪ó╪«╪▒ ╪¬╪¡╪»┘è╪½ ┘ä┘ä╪¿┘ê╪¬"""
@@ -48,6 +129,11 @@ def get_chat_id_automatically():
 
 def get_price_qos(symbol):
     """╪¼┘ä╪¿ ╪º┘ä╪│╪╣╪▒ ┘à┘å QOS API"""
+    # Prefer Alpha Vantage if an API key is configured
+    if ALPHA_VANTAGE_KEY:
+        price = get_price_alpha(symbol)
+        if price is not None:
+            return price
     try:
         url = f"{QOS_BASE_URL}/api/quote?symbol={symbol}"
         headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
@@ -58,6 +144,9 @@ def get_price_qos(symbol):
             price = data.get('price') or data.get('last') or data.get('c')
             if price:
                 return float(price)
+            print(f"ΓÜá∩╕Å ╪¼┘ä╪¿ ╪º┘ä╪│╪╣╪▒ {symbol} ┘ç╪¿╪¬ ┘ä╪¬╪¡╪╣╪╕╪¿ ╪¬╪¡╪» ╪¼┘ä╪¿: {data}")
+        else:
+            print(f"ΓÜá∩╕Å ╪¼┘ä╪¿ ╪º┘ä╪│╪╣╪▒ {symbol} ┘ç╪¿╪¬ HTTP {response.status_code}")
         return None
     except Exception as e:
         print(f"ΓÜá∩╕Å ╪«╪╖╪ú ┘ü┘è ╪¼┘ä╪¿ ╪│╪╣╪▒ {symbol}: {e}")
@@ -65,6 +154,11 @@ def get_price_qos(symbol):
 
 def get_kline_data(symbol, interval="5min", limit=50):
     """╪¼┘ä╪¿ ╪¿┘è╪º┘å╪º╪¬ ╪º┘ä╪┤┘à┘ê╪╣"""
+    # Prefer Alpha Vantage if an API key is configured
+    if ALPHA_VANTAGE_KEY:
+        data = get_kline_alpha(symbol, interval=interval, limit=limit)
+        if data:
+            return data
     try:
         url = f"{QOS_BASE_URL}/api/kline"
         params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -77,6 +171,9 @@ def get_kline_data(symbol, interval="5min", limit=50):
                 return data['data']
             elif isinstance(data, list):
                 return data
+            print(f"ΓÜá∩╕Å ╪¼┘ä╪¿ ╪¿┘è╪º┘å╪º╪¬ {symbol} ┘ç╪¿╪¬ ┘ä╪¬╪¡╪╣╪╕╪¿ ╪¬╪¡╪» ╪¼┘ä╪¿: {data}")
+        else:
+            print(f"ΓÜá∩╕Å ╪¼┘ä╪¿ ╪¿┘è╪º┘å╪º╪¬ {symbol} ┘ç╪¿╪¬ HTTP {response.status_code}")
         return []
     except Exception as e:
         print(f"ΓÜá∩╕Å ╪«╪╖╪ú ┘ü┘è ╪¿┘è╪º┘å╪º╪¬ ╪º┘ä╪┤┘à┘ê╪╣ ┘ä┘Ç {symbol}: {e}")
@@ -222,32 +319,33 @@ async def send_signal():
     for symbol, name in SYMBOLS.items():
         price = get_price_qos(symbol)
         if not price:
+            print(f"ΓÜá∩╕Å ╪¼┘ä╪¿ ╪º┘ä╪│╪╣╪▒ {symbol} ┘ç╪¿╪¬ ╪¬╪¡╪» ╪¼┘ä╪¿. Skipping.")
             continue
         
         kline_data = get_kline_data(symbol)
+        if not kline_data:
+            print(f"ΓÜá∩╕Å ╪¼┘ä╪¿ ╪¿┘è╪º┘å╪º╪¬ {symbol} ┘ç╪¿╪¬ ╪¬╪¡╪» ╪¼┘ä╪¿. Skipping.")
+            continue
+        
         signal, confidence, reason = generate_signal(name, kline_data)
         
         icon = "≡ƒƒó≡ƒÆ░" if "╪┤╪▒╪º╪í" in signal else "≡ƒö┤≡ƒôë" if "╪¿┘è╪╣" in signal else "ΓÅ│≡ƒôè"
         stars = "Γ¡É" * min(5, confidence // 15)
         
         message = f"""
-{icon} *{name}* {icon}
+{icon} {name} {icon}
 
-≡ƒÆ░ *╪º┘ä╪│╪╣╪▒ ╪º┘ä╪¡╪º┘ä┘è:* `${price:.2f}`
+Price: {price:.2f}
+Signal: {signal}
+Confidence: {confidence}% {stars}
 
-≡ƒÄ» *╪º┘ä╪Ñ╪┤╪º╪▒╪⌐:* *{signal}*
-≡ƒôê *┘å╪│╪¿╪⌐ ╪º┘ä╪½┘é╪⌐:* {confidence}% {stars}
+Reason:
+{reason}
 
-≡ƒô¥ *╪º┘ä╪¬╪¡┘ä┘è┘ä:*
-ΓÇó {reason}
-
-ΓÅ░ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
----
-ΓÜá∩╕Å ╪Ñ╪┤╪º╪▒╪⌐ ╪¬╪¡┘ä┘è┘ä ┘ü┘å┘è ┘ü┘é╪╖ - ┘é╪▒╪º╪▒┘â ┘à╪│╪ñ┘ê┘ä┘è╪¬┘â
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
         try:
-            await bot.send_message(chat_id=MY_CHAT_ID, text=message, parse_mode='Markdown')
+            await bot.send_message(chat_id=MY_CHAT_ID, text=message)
             print(f"Γ£à ╪¬┘à ╪Ñ╪▒╪│╪º┘ä ╪Ñ╪┤╪º╪▒╪⌐ {name}")
         except Exception as e:
             print(f"Γ¥î ┘ü╪┤┘ä ╪Ñ╪▒╪│╪º┘ä ╪Ñ╪┤╪º╪▒╪⌐ {name}: {e}")
